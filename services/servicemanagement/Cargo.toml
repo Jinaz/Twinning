@@ -1,0 +1,19 @@
+[package]
+name = "servicemanagement"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+async-recursion = "1.1"
+crossbeam-channel = "0.5"
+
+# Local crate dependencies
+rtservices = { path = "../rtservices" }
+nonrtservices = { path = "../nonrtservices" }

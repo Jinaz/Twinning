@@ -1,0 +1,16 @@
+[package]
+name = "fischertechnikdtengine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dt_database = { package = "postgresdb", path = "../../databases/postgresdb" }
+dt_gateway_fischertechnik = { package = "mqtt", path = "../../gateway/mqtt" }
+
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }

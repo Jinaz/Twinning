@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "engine/fischertechnikdtengine",
+  "databases/postgresdb",
+  "gateway/mqtt",
+  "services/rtservices",
+  "services/nonrtservices",
+  "services/servicemanagement"
+]
+resolver = "2"
+
+# optional but recommended: keep shared deps aligned
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-postgres = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+log = "0.4"
+env_logger = "0.11"

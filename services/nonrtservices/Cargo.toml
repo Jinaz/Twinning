@@ -1,0 +1,22 @@
+[package]
+name = "nonrtservices"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+
+# Local crate dependencies
+rtservices = { path = "../rtservices" }
+crossbeam-channel = "0.5"
+
+# REST API
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
