@@ -3,4 +3,27 @@ name = "abstractgateway"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+# default is src/lib.rs; this is just explicit
+path = "src/lib.rs"
+
+# If you want an explicit bin name (optional; Cargo auto-detects src/bin/main.rs)
+[[bin]]
+name = "main"
+path = "src/bin/main.rs"
+
 [dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-postgres = "0.7"
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use std::sync::RwLock;
 
 use dt_database::postgresimpl::PostgresDatabase;
+use dt_gateway_fischertechnik::Command;
 use dt_gateway_fischertechnik::Gateway;
 use dt_gateway_fischertechnik::GatewayConfig;
 use dt_gateway_fischertechnik::GatewayEvent;
@@ -12,9 +12,15 @@ use fischertechnikdtengine::eventsystem::eventqueue::EventQueue;
 use fischertechnikdtengine::eventsystem::workflowengine::WorkflowEngine;
 use fischertechnikdtengine::synchronizer::mappings::positionmapping::PositionMapping;
 use fischertechnikdtengine::synchronizer::synchronizer::Synchronizer;
+use tracing::{info, warn};
+use tokio::sync::RwLock;
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()>{
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
+        .init();
     env_logger::init();
 
     let event_queue = EventQueue::new(1024);
@@ -40,13 +46,16 @@ async fn main() {
     };
 
     // Start gateway (this is the MQTT reader)
-    let mut gateway = Gateway::start(cfg).await?;
+    let mut gateway = Arc::new(Gateway::start(cfg).await?);
     let cmd_tx = gateway.commands();
+
     // Property model lives in the engine (what you asked for)
     let props = Arc::new(RwLock::new(PropertyModel::default()));
+    let q = event_queue.clone();
+    let gw = gateway.clone();
 
-    // Optional: periodic readout (shows that properties are being updated)
-    
+    // Producer: simulate gateway changes + enqueue events
+    {
         let props = props.clone();
         tokio::spawn(async move {
             loop {
@@ -60,9 +69,10 @@ async fn main() {
                         info!("PROP position förderband1-4 = {} {:?}", p.value, p.unit);
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         });
+    }
 
     let db = Arc::new(PostgresDatabase::new());
 
@@ -80,7 +90,7 @@ async fn main() {
 
                 // Example: if speed too high, send a command back
                 if let Some(v) = match &t.value {
-                    mqtt::models::events::Value::Number { v, .. } => Some(*v),
+                    dt_gateway_fischertechnik::models::events::Value::Number { v, .. } => Some(*v),
                     _ => None,
                 } {
                     if t.topic.ends_with("/speed") && v > 1.0 {

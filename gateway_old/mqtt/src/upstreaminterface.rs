@@ -28,6 +28,8 @@ impl DefaultUpstream {
         Self { cfg }
     }
 
+    fn add_property(){}
+
     fn should_try_structured(&self, topic: &str, payload: &str) -> bool {
         if let Some(prefix) = &self.cfg.structured_event_prefix {
             return topic.starts_with(prefix);
