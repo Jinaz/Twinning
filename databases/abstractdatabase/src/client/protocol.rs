@@ -1,7 +1,8 @@
 // src/protocol.rs
 use anyhow::{Context, Result};
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 use std::time::Duration;
+use async_trait::async_trait;
 
 use crate::client::connector::{ConnectionFactory, ManagedConnection}; // adjust path to your traits
 
@@ -92,24 +93,17 @@ where
 {
     transport: T,
     codec: C,
-    protocol: P,
-
-    /// Optional: track if we consider it healthy; updated by ping/reset errors.
+    protocol: Arc<P>,
     healthy: bool,
 }
 
-#[async_trait::async_trait]
-impl<T, C, P> ProtocolIo for ProtocolConnection<T, C, P>
+impl<T, C, P> ProtocolConnection<T, C, P>
 where
     T: Transport,
     C: Codec<In = T::Inbound, Out = T::Outbound>,
     P: Protocol<FrameIn = C::FrameIn, FrameOut = C::FrameOut>,
 {
-
-    type FrameIn = P::FrameIn;
-    type FrameOut = P::FrameOut;
-
-    fn new(transport: T, codec: C, protocol: P) -> Self {
+    pub fn new(transport: T, codec: C, protocol: Arc<P>) -> Self {
         Self {
             transport,
             codec,
@@ -118,39 +112,49 @@ where
         }
     }
 
-    /// Send a protocol frame.
-    async fn send_frame(&mut self, frame: P::FrameOut) -> Result<()> {
+    /// Low-level: send a protocol frame.
+    pub async fn send_frame(&mut self, frame: P::FrameOut) -> Result<()> {
         let msg = self.codec.encode(frame).await?;
         self.transport.send(msg).await
     }
-
-    /// Receive a protocol frame.
-    async fn recv_frame(&mut self) -> Result<P::FrameIn> {
-        let msg = self.transport.recv().await?;
+    /// Receive a protocol frame. 
+    async fn recv_frame(&mut self) -> Result<P::FrameIn> { 
+        let msg = self.transport.recv().await?; 
         self.codec.decode(msg).await
     }
 
-
-
-
-
-    /// If you want a clean Protocol implementation *without* dealing with ProtocolIo complexities,
-    /// implement your Protocol in terms of these:
-    async fn io_send(&mut self, frame: P::FrameOut) -> Result<()> {
-        self.send_frame(frame).await
-    }
-    async fn io_recv(&mut self) -> Result<P::FrameIn> {
-        self.recv_frame().await
+    pub async fn handshake(&mut self) -> Result<()> {
+        let protocol = Arc::clone(&self.protocol); // clone handle (no borrow of self across await)
+        protocol.handshake(self).await
     }
 
-    /// Run protocol handshake.
-    async fn run_handshake(&mut self) -> Result<()> {
-        // See note above: simplest is Protocol methods accept &mut ProtocolConnection
-        // but we keep trait stable. So: call handshake via helpers in your Protocol impl.
-        //
-        // For now we just mark this as a "call your protocol directly" placeholder.
-        Ok(())
+    pub async fn ping(&mut self) -> Result<()> {
+        let protocol = Arc::clone(&self.protocol);
+        protocol.ping(self).await
     }
+
+    pub async fn reset_session(&mut self) -> Result<()> {
+        let protocol = Arc::clone(&self.protocol);
+        protocol.reset(self).await
+    }
+
+    pub async fn close_gracefully(&mut self) -> Result<()> {
+        let protocol = Arc::clone(&self.protocol);
+        let _ = protocol.on_close(self).await;
+        self.transport.close().await
+    }
+}
+
+/// ProtocolConnection is the ProtocolIo
+#[async_trait]
+impl<T, C, P> ProtocolIo for ProtocolConnection<T, C, P>
+where
+    T: Transport,
+    C: Codec<In = T::Inbound, Out = T::Outbound>,
+    P: Protocol<FrameIn = C::FrameIn, FrameOut = C::FrameOut>,
+{
+    type FrameIn = P::FrameIn;
+    type FrameOut = P::FrameOut;
 
     async fn send(&mut self, frame: Self::FrameOut) -> Result<()> {
         self.send_frame(frame).await
@@ -170,16 +174,20 @@ where
     P: Protocol<FrameIn = C::FrameIn, FrameOut = C::FrameOut>,
 {
     async fn is_healthy(&mut self) -> bool {
-        self.healthy
+        if !self.healthy {
+            return false;
+        }
+        let ok = self.ping().await.is_ok();
+        self.healthy = ok;
+        ok
     }
 
     async fn reset(&mut self) -> Result<()> {
-        // If you want to actually call protocol.reset(), there are two options:
-        // 1) Change Protocol trait to accept &mut Self (ProtocolConnection) directly
-        // 2) Keep Protocol trait and implement reset by calling conn.io_send/recv in your protocol impl,
-        //    and call it here directly via methods you add on P (see below).
-        //
-        // Minimal default behavior: try ping via an optional hook, otherwise just OK.
+        // Reset session state; if it fails mark unhealthy so pool discards it.
+        if let Err(e) = self.reset_session().await {
+            self.healthy = false;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -193,9 +201,10 @@ where
 /// This is what you pass into your Connector<...>.
 #[derive(Debug, Clone)]
 pub struct ProtocolFactory<TF, C, P> {
+    pub cfg: Arc<crate::model::configuration::ClientConfig>,
     pub transport_factory: TF,
     pub codec: C,
-    pub protocol: P,
+    pub protocol: Arc<P>,
 
     /// Optional: timeout for establishing the connection (transport_factory.connect()).
     pub connect_timeout: Option<Duration>,
@@ -204,7 +213,7 @@ pub struct ProtocolFactory<TF, C, P> {
 #[async_trait::async_trait]
 pub trait TransportFactory: Send + Sync + Debug + 'static {
     type T: Transport;
-    async fn connect(&self) -> Result<Self::T>;
+    async fn connect(&self, cfg: &crate::model::configuration::ClientConfig) -> Result<Self::T>;
 }
 
 #[async_trait::async_trait]
@@ -212,26 +221,28 @@ impl<TF, C, P> ConnectionFactory for ProtocolFactory<TF, C, P>
 where
     TF: TransportFactory,
     C: Codec<In = <TF::T as Transport>::Inbound, Out = <TF::T as Transport>::Outbound> + Clone,
-    P: Protocol<FrameIn = C::FrameIn, FrameOut = C::FrameOut> + Clone,
+    P: Protocol<FrameIn = C::FrameIn, FrameOut = C::FrameOut>,
 {
     type Conn = ProtocolConnection<TF::T, C, P>;
 
     async fn connect(&self) -> Result<Self::Conn> {
-        let make_transport = self.transport_factory.connect();
-        let transport = if let Some(t) = self.connect_timeout {
-            tokio::time::timeout(t, make_transport)
-                .await
-                .context("transport connect timed out")??
-        } else {
-            make_transport.await?
-        };
+        //let make_transport = self.transport_factory.connect();
+         let transport = self.transport_factory.connect(&self.cfg).await?;
+        //let transport = if let Some(t) = self.connect_timeout {
+        //    tokio::time::timeout(t, make_transport)
+        //        .await
+        //        .context("transport connect timed out")??
+        //} else {
+        //    make_transport.await?
+        //};
 
-        let mut conn = ProtocolConnection::new(transport, self.codec.clone(), self.protocol.clone());
+        let mut conn = ProtocolConnection::new(transport, self.codec.clone(), Arc::clone(&self.protocol));
 
         // Here is where you'd call conn.protocol.handshake(...) if you choose the ProtocolIo approach.
         // For now, leave handshake to the DB-specific constructor, or evolve Protocol trait to accept &mut ProtocolConnection.
         //
         // e.g. conn.protocol.handshake_conn(&mut conn).await?;
+        conn.handshake().await?;
         Ok(conn)
     }
 }

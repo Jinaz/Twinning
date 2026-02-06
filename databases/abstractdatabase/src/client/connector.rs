@@ -95,6 +95,19 @@ struct SessionDropShim<F: ConnectionFactory> {
     owner: Arc<Connector<F>>,
 }
 
+impl From<&crate::model::configuration::ClientConfig> for ConnectorConfig {
+    fn from(cfg: &crate::model::configuration::ClientConfig) -> Self {
+        Self {
+            max_size: cfg.pooling.max_size,
+            min_size: cfg.pooling.min_size,
+            checkout_timeout: cfg.pooling.checkout_timeout,
+            max_idle: cfg.pooling.max_idle,
+            prewarm_interval: Duration::from_secs(10), // or add it to PoolingConfig
+        }
+    }
+}
+
+
 
 impl Default for ConnectorConfig {
     fn default() -> Self {

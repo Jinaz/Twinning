@@ -10,11 +10,12 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
-use abstractdatabase::client::{ManagedConnection, ConnectionFactory, ConnectorConfig, Connector};
 
-use std::time::Duration;
-use abstractdatabase::protocol::{
-    Codec, Protocol, ProtocolConnection, ProtocolFactory, Transport, TransportFactory,
+use abstractdatabase::client::{ManagedConnection, ConnectionFactory, ConnectorConfig, Connector};
+use abstractdatabase::model::configuration::{ClientConfig, AuthKind, TopologyConfig, EndpointConfig};
+
+use abstractdatabase::client::protocol::{
+    Codec, Protocol, ProtocolFactory, Transport, TransportFactory,ProtocolIo
 };
 
 //
@@ -44,18 +45,6 @@ impl ManagedConnection for DummyConn {
     }
 }
 
-#[derive(Debug)]
-struct DummyFactory;
-
-#[async_trait::async_trait]
-impl ConnectionFactory for DummyFactory {
-    type Conn = DummyConn;
-
-    async fn connect(&self) -> Result<Self::Conn> {
-        Ok(DummyConn { healthy: true })
-    }
-}
-
 
 #[derive(Debug)]
 struct DummyTransport;
@@ -65,19 +54,31 @@ impl Transport for DummyTransport {
     type Inbound = ();
     type Outbound = ();
 
-    async fn send(&mut self, _msg: Self::Outbound) -> Result<()> { Ok(()) }
-    async fn recv(&mut self) -> Result<Self::Inbound> { Ok(()) }
-    async fn close(&mut self) -> Result<()> { Ok(()) }
+    async fn send(&mut self, _msg: Self::Outbound) -> Result<()> {
+        Ok(())
+    }
+    async fn recv(&mut self) -> Result<Self::Inbound> {
+        Ok(())
+    }
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
-#[derive(Debug)]
+/// Now: TransportFactory does NOT need to store cfg.
+/// It receives cfg in connect(&ClientConfig).
+#[derive(Debug, Clone)]
 struct DummyTransportFactory;
 
 #[async_trait::async_trait]
 impl TransportFactory for DummyTransportFactory {
     type T = DummyTransport;
 
-    async fn connect(&self) -> Result<Self::T> {
+    async fn connect(&self, cfg: &ClientConfig) -> Result<Self::T> {
+        // Use cfg here (endpoint selection, tls/auth decisions, etc.)
+        let ep = &cfg.topology.endpoints[0];
+        println!("Connecting to {}:{}", ep.host, ep.port);
+
         Ok(DummyTransport)
     }
 }
@@ -93,11 +94,16 @@ impl Codec for PassthroughCodec {
     type FrameIn = ();
     type FrameOut = ();
 
-    async fn decode(&mut self, msg: Self::In) -> Result<Self::FrameIn> { Ok(msg) }
-    async fn encode(&mut self, frame: Self::FrameOut) -> Result<Self::Out> { Ok(frame) }
+    async fn decode(&mut self, msg: Self::In) -> Result<Self::FrameIn> {
+        Ok(msg)
+    }
+
+    async fn encode(&mut self, frame: Self::FrameOut) -> Result<Self::Out> {
+        Ok(frame)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DummyProtocol;
 
 #[async_trait::async_trait]
@@ -105,50 +111,84 @@ impl Protocol for DummyProtocol {
     type FrameIn = ();
     type FrameOut = ();
 
-    async fn handshake(&self, _io: &mut abstractdatabase::protocol::ProtocolIo<'_, Self>) -> Result<()> {
+    async fn handshake(
+        &self,
+        _io: &mut dyn ProtocolIo<FrameIn = Self::FrameIn, FrameOut = Self::FrameOut>,
+    ) -> Result<()> {
         Ok(())
     }
-    async fn ping(&self, _io: &mut abstractdatabase::protocol::ProtocolIo<'_, Self>) -> Result<()> {
+
+    async fn ping(
+        &self,
+        _io: &mut dyn ProtocolIo<FrameIn = Self::FrameIn, FrameOut = Self::FrameOut>,
+    ) -> Result<()> {
         Ok(())
     }
-    async fn reset(&self, _io: &mut abstractdatabase::protocol::ProtocolIo<'_, Self>) -> Result<()> {
+
+    async fn reset(
+        &self,
+        _io: &mut dyn ProtocolIo<FrameIn = Self::FrameIn, FrameOut = Self::FrameOut>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_close(
+        &self,
+         _io: &mut dyn ProtocolIo<FrameIn=Self::FrameIn, FrameOut=Self::FrameOut>
+        ) -> Result<()>{
         Ok(())
     }
 }
 
 
+fn connector_config_from_client(cfg: &ClientConfig) -> ConnectorConfig {
+    ConnectorConfig {
+        max_size: cfg.pooling.max_size,
+        min_size: cfg.pooling.min_size,
+        checkout_timeout: cfg.pooling.checkout_timeout,
+        max_idle: cfg.pooling.max_idle,
+        prewarm_interval: Duration::from_secs(10), // or add to PoolingConfig
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = ConnectorConfig {
-        max_size: 4,
-        min_size: 0,
-        checkout_timeout: Duration::from_secs(2),
-        max_idle: Some(Duration::from_secs(60)),
-        prewarm_interval: Duration::from_secs(10),
+    // 1) Build the unified config
+    let client_cfg = ClientConfig {
+        application_name: Some("demo".into()),
+        topology: TopologyConfig {
+            endpoints: vec![EndpointConfig::new("127.0.0.1", 5432)],
+            database: Some("example".into()),
+            ..Default::default()
+        },
+        ..Default::default()
     };
 
-    // This replaces DummyFactory:
+    client_cfg.validate()?;
+    let client_cfg = Arc::new(client_cfg);
+
+    // 2) Derive connector config
+    let connector_cfg = connector_config_from_client(&client_cfg);
+
+    // 3) Build protocol factory WITH cfg
     let factory = ProtocolFactory {
-        transport_factory: DummyTransportFactory,
+        cfg: Arc::clone(&client_cfg),               // <-- NEW in option B
+        transport_factory: DummyTransportFactory,   // <-- no cfg inside
         codec: PassthroughCodec,
-        protocol: DummyProtocol,
+        protocol: Arc::new(DummyProtocol),
         connect_timeout: Some(Duration::from_secs(2)),
     };
 
-    let connector = Connector::new(DummyFactory, cfg);
+    // 4) Create connector using protocol factory
+    let connector = Connector::new(factory, connector_cfg);
 
-    // Optional: connector.start_prewarm();
-
-    // Checkout a session
+    // 5) Use it
     let mut s = connector.session().await?;
     {
         let conn = s.conn_mut()?;
-        // use conn for protocol calls
-        let _ = conn.is_healthy().await;
+        let ok = conn.is_healthy().await;
+        println!("healthy: {ok}");
     }
-
-    // Drop returns it to pool (async via tokio::spawn)
     drop(s);
 
     Ok(())
