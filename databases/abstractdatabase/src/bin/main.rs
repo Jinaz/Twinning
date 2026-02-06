@@ -1,21 +1,25 @@
-
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::{
     fmt::Debug,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 
-use abstractdatabase::client::{ManagedConnection, ConnectionFactory, ConnectorConfig, Connector};
-use abstractdatabase::model::configuration::{ClientConfig, AuthKind, TopologyConfig, EndpointConfig};
+use abstractdatabase::client::{ConnectionFactory, Connector, ConnectorConfig, ManagedConnection};
+use abstractdatabase::model::configuration::{
+    AuthKind, ClientConfig, EndpointConfig, TopologyConfig,
+};
+
+use abstractdatabase::model::serialization::*;
+use std::collections::BTreeMap;
 
 use abstractdatabase::client::protocol::{
-    Codec, Protocol, ProtocolFactory, Transport, TransportFactory,ProtocolIo
+    Codec, Protocol, ProtocolFactory, ProtocolIo, Transport, TransportFactory,
 };
 
 //
@@ -44,7 +48,6 @@ impl ManagedConnection for DummyConn {
         Ok(())
     }
 }
-
 
 #[derive(Debug)]
 struct DummyTransport;
@@ -134,12 +137,11 @@ impl Protocol for DummyProtocol {
 
     async fn on_close(
         &self,
-         _io: &mut dyn ProtocolIo<FrameIn=Self::FrameIn, FrameOut=Self::FrameOut>
-        ) -> Result<()>{
+        _io: &mut dyn ProtocolIo<FrameIn = Self::FrameIn, FrameOut = Self::FrameOut>,
+    ) -> Result<()> {
         Ok(())
     }
 }
-
 
 fn connector_config_from_client(cfg: &ClientConfig) -> ConnectorConfig {
     ConnectorConfig {
@@ -172,8 +174,8 @@ async fn main() -> Result<()> {
 
     // 3) Build protocol factory WITH cfg
     let factory = ProtocolFactory {
-        cfg: Arc::clone(&client_cfg),               // <-- NEW in option B
-        transport_factory: DummyTransportFactory,   // <-- no cfg inside
+        cfg: Arc::clone(&client_cfg),             // <-- NEW in option B
+        transport_factory: DummyTransportFactory, // <-- no cfg inside
         codec: PassthroughCodec,
         protocol: Arc::new(DummyProtocol),
         connect_timeout: Some(Duration::from_secs(2)),
@@ -189,6 +191,63 @@ async fn main() -> Result<()> {
         let ok = conn.is_healthy().await;
         println!("healthy: {ok}");
     }
+
+    // --- Serialization / dynamic schema usage demo ---
+
+    let registry = DataPointRegistry::new();
+
+    // 1) Define a datapoint (schema/meta)
+    registry
+        .upsert_meta(DataPointMeta {
+            id: DataPointId::new("temp-1"),
+            name: QualifiedName::new("machine.1.temperature"),
+            declared_type: ValueType::F64,
+            unit: Some("°C".into()),
+            description: Some("Spindle temperature".into()),
+            tags: BTreeMap::new(),
+            source: None,
+            constraints: None,
+        })
+        .await?;
+
+    // 2) Update current value
+    registry
+        .set_value(
+            DataPointId::new("temp-1"),
+            TimedValue::now(Value::F64(42.5)),
+            /*auto_define=*/ false,
+            /*default_name=*/ None,
+            /*default_tags=*/ BTreeMap::new(),
+        )
+        .await?;
+
+    // 3) Add a NEW datapoint on the fly (auto_define=true)
+    registry
+        .set_value(
+            DataPointId::new("pressure-1"),
+            TimedValue::now(Value::F64(1.23)),
+            /*auto_define=*/ true,
+            /*default_name=*/ Some(QualifiedName::new("machine.1.pressure")),
+            /*default_tags=*/
+            {
+                let mut t = BTreeMap::new();
+                t.insert("unit".into(), "bar".into());
+                t
+            },
+        )
+        .await?;
+
+    // 4) Read back
+    if let Some(dp) = registry
+        .get_by_name(&QualifiedName::new("machine.1.temperature"))
+        .await
+    {
+        println!("Datapoint: {:?}", dp.meta.name);
+        println!("Declared type: {:?}", dp.meta.declared_type);
+        println!("Current: {:?}", dp.current);
+    }
+
+    println!("All datapoints: {:#?}", registry.list().await);
     drop(s);
 
     Ok(())
